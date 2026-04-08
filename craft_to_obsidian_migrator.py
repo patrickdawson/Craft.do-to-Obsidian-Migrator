@@ -119,7 +119,7 @@ def process_content(content: str, note_title: str, attachments_subfolder_name: s
         sanitized_filename = sanitize_filename(decoded_filename)
         full_link_path = Path(attachments_subfolder_name) / sanitized_filename
         return f"![[{full_link_path.as_posix()}]]"
-    content = re.sub(r'!\[(.*?)\]\(assets/(.*?)\)', update_asset_link, content)
+    content = re.sub(r'!\[(.*?)\]\(assets/((?:[^()]+|\([^()]*\))*)\)', update_asset_link, content)
 
     content = re.sub(r'\[([^\]]+)\]\(javascript:[^)]+\)', r'\1', content)
     
@@ -189,19 +189,22 @@ def final_polish(output_dir: str, cleanup_links: bool, delete_empty: bool) -> No
     """Performs final polishing and optional broken link cleanup."""
     logging.info("\n--- Starting Final Polishing Phase ---")
     output_path = Path(output_dir)
-    deleted, renamed, daily_notes, cleaned_links = 0, 0, 0, 0
-    
+    deleted_notes: List[str] = []
+    renamed_notes: List[Tuple[str, str]] = []
+    standardized_notes: List[Tuple[str, str]] = []
+    cleaned_link_details: List[Tuple[str, str]] = []
+
     all_files = list(output_path.rglob('*.md'))
     for filepath in all_files:
         try:
             content = filepath.read_text(encoding='utf-8')
             if cleanup_links:
                 original_content = content
-                def link_replacer(match):
+                current_file = filepath
+                def link_replacer(match, _file=current_file):
                     link_target = match.group(1).replace('\\', '/')
-                    if link_target not in found_assets: 
-                        nonlocal cleaned_links
-                        cleaned_links +=1
+                    if link_target not in found_assets:
+                        cleaned_link_details.append((_file.stem, link_target))
                         return ""
                     return match.group(0)
                 content = re.sub(r'^\s*!\[\[([^\]]+)\]\]\s*$', link_replacer, content, flags=re.MULTILINE)
@@ -209,28 +212,61 @@ def final_polish(output_dir: str, cleanup_links: bool, delete_empty: bool) -> No
 
             content_after_frontmatter = re.sub(r'---\s*[\s\S]*?---', '', content, count=1).strip()
             if delete_empty and not content_after_frontmatter:
-                filepath.unlink(); deleted += 1; logging.info(f"Deleted empty note: {filepath.name}"); continue
-            
+                filepath.unlink()
+                deleted_notes.append(filepath.name)
+                logging.info(f"Deleted empty note: {filepath.name}")
+                continue
+
             if filepath.stem.lower() in ['new document', 'untitled', '']:
                 new_name_base = sanitize_filename(content_after_frontmatter.split('\n')[0].lstrip('# ').strip())
                 if new_name_base:
                     new_filepath = filepath.with_name(f"{new_name_base}.md")
                     if not new_filepath.exists():
-                        filepath.rename(new_filepath); renamed += 1; logging.info(f"Renamed '{filepath.name}' to '{new_filepath.name}'"); filepath = new_filepath
-            
+                        old_name = filepath.name
+                        filepath.rename(new_filepath)
+                        renamed_notes.append((old_name, new_filepath.name))
+                        logging.info(f"Renamed '{old_name}' to '{new_filepath.name}'")
+                        filepath = new_filepath
+
             if match := re.match(r'(\d{4})[.-](\d{2})[.-](\d{2})', filepath.stem):
                 try:
                     datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
                     new_name = f"{match.group(1)}-{match.group(2)}-{match.group(3)}.md"
                     new_filepath = filepath.with_name(new_name)
-                    if not new_filepath.exists(): filepath.rename(new_filepath); daily_notes += 1
+                    if not new_filepath.exists():
+                        old_name = filepath.name
+                        filepath.rename(new_filepath)
+                        standardized_notes.append((old_name, new_filepath.name))
                 except ValueError: pass
         except (IOError, OSError) as e:
             logging.warning(f"Could not process {filepath.name}. Reason: {e}")
-    
-    summary = f"Deleted {deleted} notes, renamed {renamed} notes, standardized {daily_notes} daily notes"
-    if cleanup_links: summary += f", cleaned {cleaned_links} broken image links"
+
+    summary = f"Deleted {len(deleted_notes)} notes, renamed {len(renamed_notes)} notes, standardized {len(standardized_notes)} daily notes"
+    if cleanup_links: summary += f", cleaned {len(cleaned_link_details)} broken image links"
     logging.info(f"\nPolishing Complete: {summary}.")
+
+    if deleted_notes:
+        logging.info(f"\nDeleted notes ({len(deleted_notes)}):")
+        for name in deleted_notes:
+            logging.info(f"  - {name}")
+
+    if renamed_notes:
+        logging.info(f"\nRenamed notes ({len(renamed_notes)}):")
+        for old, new in renamed_notes:
+            logging.info(f"  - '{old}' -> '{new}'")
+
+    if standardized_notes:
+        logging.info(f"\nStandardized daily notes ({len(standardized_notes)}):")
+        for old, new in standardized_notes:
+            if old != new:
+                logging.info(f"  - '{old}' -> '{new}'")
+            else:
+                logging.info(f"  - '{old}'")
+
+    if cleanup_links and cleaned_link_details:
+        logging.info(f"\nRemoved broken image links ({len(cleaned_link_details)}):")
+        for page, link in cleaned_link_details:
+            logging.info(f"  - '{link}' in '{page}'")
 
 def get_user_preferences(output_path: Path) -> dict:
     """Asks user a series of questions to configure the script."""
